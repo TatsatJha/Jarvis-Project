@@ -1,95 +1,90 @@
 import os
-import sounddevice as sd
-from scipy.io.wavfile import write
-import whisper
-from yt_dlp import YoutubeDL
-import pygame
+from listen import record_audio, transcribe_audio
+from download import download_video, has_been_downloaded, add_to_record
+from speaker import play
+import threading
+import torchaudio as ta
+from chatterbox.tts import ChatterboxTTS
+import socket
 
-RECORD_FILE = "downloaded.txt"
+HOST = "127.0.0.1"
+PORT = 65432
 
-def record_audio(filename ="output.wav", duration = 5, fs = 16000):
-    print("Recording audio...")
-    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-    sd.wait()
-    write(filename, fs, audio)
-    print("Audio recorded.")
-    return audio
 
-def transcribe_audio(filename = "output.wav", model = "medium.en"):
-    model = whisper.load_model(model)
-    text = model.transcribe(filename)
-    return text
+device = "cpu"
+model = ChatterboxTTS.from_pretrained(device=device)
+audio_prompt_path = "sound/jarvis.wav"
 
-def download_video(query):
-    output_path = "downloads/" + query
-    search_opts = {
-        'quiet': True,
-        'skip_download': True,
-    }
-    ydl_opts = {
-        'format':'bestaudio/best',
-        'outtmpl': output_path,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'quiet': True
-    }
-    with YoutubeDL() as ydl:
-        results = ydl.extract_info(f"ytsearch5:{query}", download=False)
-        entries = results['entries']
-        if len(entries) < 2:
-            raise Exception("Less than 2 results found.")
-        second_video_url = entries[1]['webpage_url']
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.download([second_video_url])
+def say(text):
+    wav = model.generate(
+        text,
+        audio_prompt_path=audio_prompt_path
+    )
+    ta.save("output.wav", wav, model.sr)
+    return "output.wav"
 
-def has_been_downloaded(video_id):
-    if not os.path.exists(RECORD_FILE):
-        return False
-    with open(RECORD_FILE, "r") as f:
-        return video_id.strip() in {line.strip() for line in f}
-
-def add_to_record(video_id):
-    with open(RECORD_FILE, "a") as f:
-        f.write(video_id + "\n")
 
 def play_audio(filename):
-    pygame.mixer.init()
-    pygame.mixer.music.load(filename)
-    pygame.mixer.music.play()
+    threading.Thread(target=play, args=(filename,), daemon=True).start()
 
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
 
-def __main__():
-    audio = record_audio()
+def handle_play(text):
+    videoParam = text.split("play")[1].strip()
+    if (videoParam[-1] == "?" or videoParam[-1] == "!") or videoParam[-1] == ".":
+        videoParam = videoParam[:-1]
+    print("Playing video", videoParam)
+    if has_been_downloaded(videoParam):
+        print("Video already downloaded")
+    else:
+        download_video(videoParam)
+        add_to_record(videoParam)
+
+    cwd = os.getcwd()
+    path = os.path.join(cwd, "downloads", videoParam + ".mp3")
+    file = say("Playing " + videoParam)
+    play_audio(file)
+    play_audio(path)
+
+
+def handle_bootup():
+    play("downloads/bootup.mp3")
+    play("downloads/good-evening.wav")
+
+
+def run_voice_command():
+    # tts = TTS("sound/jarvis.wav")
+    print("We have a command")
+    record_audio(duration=5)
     result = transcribe_audio()
     text = result['text'].strip()
     text = text.lower()
     print("Text transcribed:", text)
-    if(text.__contains__("jarvis")):
-        print("Good Evening, Mr. Jha")
+    if (text.__contains__("play")):
+        handle_play(text)
+    elif (text.__contains__("wake up")):
+        handle_bootup()
+    elif (text.__contains__("introduce")):
+        play_audio("downloads/introduce.wav")
+    else:
+        print("some banter")
 
-        if(text.__contains__("play")):
-            videoParam = text.split("play")[1].strip()
-            if(videoParam[-1] == "?" or videoParam[-1] == "!") or videoParam[-1] == ".":
-                videoParam = videoParam[:-1]
-            print("Playing video", videoParam)
-            if has_been_downloaded(videoParam):
-                print("Video already downloaded")
-            else:
-                download_video(videoParam)
-                add_to_record(videoParam)
 
-            cwd = os.getcwd()
-            path = os.path.join(cwd, "downloads", videoParam + ".mp3")
-            play_audio(path)
+def __main__():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        print("Serer is lisetning on {HOST}:{PORT}".format(
+            HOST=HOST, PORT=PORT))
 
-            
-
+        while True:
+            conn, addr = s.accept()
+            with conn:
+                data = conn.recv(1024).decode("utf-8").strip()
+                if data == "wake":
+                    print("Hot key detected, starting voice command")
+                    # run voice command
+                    run_voice_command()
 
 
 if __name__ == "__main__":
